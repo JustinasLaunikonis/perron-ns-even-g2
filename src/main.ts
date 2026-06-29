@@ -1,0 +1,2118 @@
+import {
+  waitForEvenAppBridge,
+  TextContainerProperty,
+  CreateStartUpPageContainer,
+  TextContainerUpgrade,
+  OsEventTypeList,
+} from '@evenrealities/even_hub_sdk'
+import { fetchStations, fetchTrips } from './ns'
+import type { StationInfo, Trip, TripLeg, TravelMode, TripOptions } from './ns'
+import './style.css'
+
+// Only the icons actually referenced by icon() are imported, so unused SVGs are
+// not bundled into the .ehpk. Keys match the 'Folder/Name' strings passed to icon().
+import iconCross from './icons/Edit & Settings Icons/Cross.svg?raw'
+import iconSwitch from './icons/Edit & Settings Icons/Switch.svg?raw'
+import iconAccount from './icons/Feature & Function Icons/Account.svg?raw'
+import iconTimeCounting from './icons/Feature & Function Icons/Time Counting.svg?raw'
+import iconBack from './icons/Guide System/Back.svg?raw'
+import iconChevronBack from './icons/Guide System/Chevron - Back.svg?raw'
+import iconChevronDrillIn from './icons/Guide System/Chevron - Drill-in.svg?raw'
+import iconGo from './icons/Guide System/Go.svg?raw'
+import iconBus from './icons/Navigate Feature Icon/Bus.svg?raw'
+import iconEndLocation from './icons/Navigate Feature Icon/End Location.svg?raw'
+import iconHomeAddress from './icons/Navigate Feature Icon/Home Address.svg?raw'
+import iconLocation from './icons/Navigate Feature Icon/Location.svg?raw'
+import iconOfficeAddress from './icons/Navigate Feature Icon/Office Address.svg?raw'
+import iconTrain from './icons/Navigate Feature Icon/Train.svg?raw'
+import iconWalk from './icons/Navigate Feature Icon/Walk.svg?raw'
+import iconFav from './icons/Status Icons/Fav.svg?raw'
+import iconMore from './icons/Status Icons/More.svg?raw'
+import iconUnfav from './icons/Status Icons/Unfav.svg?raw'
+
+const ICON_RAW: Record<string, string> = {
+  './icons/Edit & Settings Icons/Cross.svg': iconCross,
+  './icons/Edit & Settings Icons/Switch.svg': iconSwitch,
+  './icons/Feature & Function Icons/Account.svg': iconAccount,
+  './icons/Feature & Function Icons/Time Counting.svg': iconTimeCounting,
+  './icons/Guide System/Back.svg': iconBack,
+  './icons/Guide System/Chevron - Back.svg': iconChevronBack,
+  './icons/Guide System/Chevron - Drill-in.svg': iconChevronDrillIn,
+  './icons/Guide System/Go.svg': iconGo,
+  './icons/Navigate Feature Icon/Bus.svg': iconBus,
+  './icons/Navigate Feature Icon/End Location.svg': iconEndLocation,
+  './icons/Navigate Feature Icon/Home Address.svg': iconHomeAddress,
+  './icons/Navigate Feature Icon/Location.svg': iconLocation,
+  './icons/Navigate Feature Icon/Office Address.svg': iconOfficeAddress,
+  './icons/Navigate Feature Icon/Train.svg': iconTrain,
+  './icons/Navigate Feature Icon/Walk.svg': iconWalk,
+  './icons/Status Icons/Fav.svg': iconFav,
+  './icons/Status Icons/More.svg': iconMore,
+  './icons/Status Icons/Unfav.svg': iconUnfav,
+}
+
+const BODY = { id: 1, name: 'body', x: 0, y: 0, w: 576, h: 288, pad: 4, border: 0 }
+
+const CLOCK_MS = 10000
+let clockTimer: ReturnType<typeof setInterval> | undefined
+
+const TRIPS_REFRESH_MS = 60000
+let tripsTimer: ReturnType<typeof setInterval> | undefined
+
+interface SavedRoute {
+  fromCode: string
+  fromName: string
+  toCode: string
+  toName: string
+}
+const ROUTES_KEY = 'perron-ns.routes.v1'
+let savedRoutes: SavedRoute[] = []
+
+async function loadRoutes(): Promise<SavedRoute[]> {
+  try {
+    const stored = await bridge.getLocalStorage(ROUTES_KEY)
+    let text = '[]'
+    if (stored) {
+      text = stored
+    }
+    const raw = JSON.parse(text)
+    if (Array.isArray(raw)) {
+      return raw
+    }
+    return []
+  } catch {
+    return []
+  }
+}
+
+async function persistRoutes() {
+  try {
+    await bridge.setLocalStorage(ROUTES_KEY, JSON.stringify(savedRoutes))
+  } catch (err) {
+    console.error('persistRoutes failed:', err)
+  }
+}
+
+function addRoute(r: SavedRoute) {
+  const rest: SavedRoute[] = []
+  for (const s of savedRoutes) {
+    if (s.fromCode === r.fromCode && s.toCode === r.toCode) {
+      continue
+    }
+    rest.push(s)
+  }
+  const combined: SavedRoute[] = [r]
+  for (const s of rest) {
+    combined.push(s)
+  }
+  savedRoutes = combined.slice(0, 8)
+  persistRoutes()
+  onRoutesChanged()
+}
+
+function removeRoute(fromCode: string, toCode: string) {
+  const next: SavedRoute[] = []
+  for (const r of savedRoutes) {
+    if (r.fromCode === fromCode && r.toCode === toCode) {
+      continue
+    }
+    next.push(r)
+  }
+  savedRoutes = next
+  persistRoutes()
+  onRoutesChanged()
+}
+
+function onRoutesChanged() {
+  renderSavedRoutes()
+}
+
+type FavIcon = 'home' | 'work' | 'default'
+interface Favorite {
+  code: string
+  name: string
+  label: string
+  icon: FavIcon
+}
+const FAVES_KEY = 'perron-ns.favorites.v1'
+let favorites: Favorite[] = []
+
+async function loadFavorites(): Promise<Favorite[]> {
+  try {
+    const stored = await bridge.getLocalStorage(FAVES_KEY)
+    let text = '[]'
+    if (stored) {
+      text = stored
+    }
+    const raw = JSON.parse(text)
+    if (!Array.isArray(raw)) {
+      return []
+    }
+    const result: Favorite[] = []
+    for (const f of raw) {
+      let label = f.name
+      if (f.label !== undefined && f.label !== null) {
+        label = f.label
+      }
+      let icon: FavIcon = 'default'
+      if (f.icon === 'home' || f.icon === 'work') {
+        icon = f.icon
+      }
+      result.push({ code: f.code, name: f.name, label: label, icon: icon })
+    }
+    return result
+  } catch {
+    return []
+  }
+}
+
+async function persistFavorites() {
+  try {
+    await bridge.setLocalStorage(FAVES_KEY, JSON.stringify(favorites))
+  } catch (err) {
+    console.error('persistFavorites failed:', err)
+  }
+}
+
+function isFavorite(code: string): boolean {
+  for (const f of favorites) {
+    if (f.code === code) {
+      return true
+    }
+  }
+  return false
+}
+
+function addFavorite(f: { code: string; name: string }) {
+  if (!isFavorite(f.code)) {
+    favorites.push({ code: f.code, name: f.name, label: f.name, icon: 'default' })
+    persistFavorites()
+    renderFavorites()
+  }
+}
+
+function removeFavorite(code: string) {
+  const next: Favorite[] = []
+  for (const f of favorites) {
+    if (f.code !== code) {
+      next.push(f)
+    }
+  }
+  favorites = next
+  persistFavorites()
+  renderFavorites()
+}
+
+type TimeMode = 'departure' | 'arrival'
+// Committed departure/arrival selection used for trip planning.
+// planDateTime === null means "leave now".
+let planTimeMode: TimeMode = 'departure'
+let planDateTime: Date | null = null
+
+function tripOpts(): TripOptions {
+  if (!planDateTime) {
+    return {}
+  }
+  return {
+    dateTime: planDateTime.toISOString(),
+    searchForArrival: planTimeMode === 'arrival',
+  }
+}
+
+function hhmm(iso: string): string {
+  return new Date(iso).toLocaleTimeString('nl-NL', { hour: '2-digit', minute: '2-digit' })
+}
+
+function clockNow(): string {
+  return new Date().toLocaleTimeString('nl-NL', { hour: '2-digit', minute: '2-digit' })
+}
+
+const bridge = await waitForEvenAppBridge()
+
+savedRoutes = await loadRoutes()
+favorites = await loadFavorites()
+
+const body = new TextContainerProperty({
+  xPosition: BODY.x, yPosition: BODY.y, width: BODY.w, height: BODY.h,
+  borderWidth: BODY.border, borderColor: 5, paddingLength: BODY.pad,
+  containerID: BODY.id, containerName: BODY.name,
+  content: clockNow(), isEventCapture: 1,
+})
+
+const created = await bridge.createStartUpPageContainer(
+  new CreateStartUpPageContainer({ containerTotalNum: 1, textObject: [body] }),
+)
+if (created !== 0) {
+  console.error('createStartUpPageContainer failed:', created)
+}
+
+let rendering: Promise<unknown> = Promise.resolve()
+async function draw(bodyText: string) {
+  rendering = rendering.then(function () {
+    return bridge.textContainerUpgrade(
+      new TextContainerUpgrade({ containerID: BODY.id, containerName: BODY.name, content: bodyText }),
+    )
+  })
+  await rendering
+}
+
+const MAX_JOURNEYS = 3
+let journeyIdx = 0
+
+function visibleJourneyCount(): number {
+  if (savedRoutes.length < MAX_JOURNEYS) {
+    return savedRoutes.length
+  }
+  return MAX_JOURNEYS
+}
+
+let view: 'home' | 'list' | 'detail' = 'home'
+let detailRoute: SavedRoute | null = null
+let detailTrips: Trip[] = []
+let tripIdx = 0
+let detailStatus: 'loading' | 'ready' | 'error' = 'loading'
+let detailError = ''
+
+function lensContent(): string {
+  const count = visibleJourneyCount()
+  if (journeyIdx >= count) {
+    journeyIdx = Math.max(0, count - 1)
+  }
+  const lines: string[] = [
+    'Please set a route in the app OR select from a previous journey:',
+  ]
+  for (let i = 0; i < savedRoutes.length && i < MAX_JOURNEYS; i++) {
+    const r = savedRoutes[i]
+    let marker = ' '
+    if (i === journeyIdx) {
+      marker = '>'
+    }
+    lines.push(marker + ' ' + (i + 1) + '. ' + r.fromName + ' to ' + r.toName)
+  }
+  return lines.join('\n')
+}
+
+async function renderLens() {
+  let content = ''
+  if (view === 'detail') {
+    content = detailContent()
+  } else if (view === 'list') {
+    content = listContent()
+  } else {
+    content = lensContent()
+  }
+  await draw(clockNow() + '\n' + content)
+}
+
+function cycleJourney(delta: number) {
+  const count = visibleJourneyCount()
+  if (count === 0) {
+    return
+  }
+  journeyIdx = (journeyIdx + delta + count) % count
+  renderLens().catch(function (err) {
+    console.error(err)
+  })
+}
+
+const MAX_TRIP_OPTIONS = 5
+
+function delayTag(min: number): string {
+  if (min > 0) {
+    return ' +' + min
+  }
+  return ''
+}
+
+function visibleTripCount(): number {
+  if (detailTrips.length < MAX_TRIP_OPTIONS) {
+    return detailTrips.length
+  }
+  return MAX_TRIP_OPTIONS
+}
+
+function listContent(): string {
+  const route = detailRoute
+  if (!route) {
+    return lensContent()
+  }
+  const head = route.fromName + ' > ' + route.toName
+  if (detailStatus === 'loading') {
+    return head + '\n\nLoading times...'
+  }
+  if (detailStatus === 'error') {
+    return head + '\n\n! ' + detailError
+  }
+
+  const count = visibleTripCount()
+  if (tripIdx >= count) {
+    tripIdx = Math.max(0, count - 1)
+  }
+  const lines: string[] = [head, '']
+  for (let i = 0; i < detailTrips.length && i < MAX_TRIP_OPTIONS; i++) {
+    const t = detailTrips[i]
+    let firstDelay = 0
+    if (t.legs[0]) {
+      firstDelay = t.legs[0].departureDelayMin
+    }
+    let lastDelay = 0
+    if (t.legs[t.legs.length - 1]) {
+      lastDelay = t.legs[t.legs.length - 1].arrivalDelayMin
+    }
+    const dep = hhmm(t.departure) + delayTag(firstDelay)
+    const arr = hhmm(t.arrival) + delayTag(lastDelay)
+    let marker = ' '
+    if (i === tripIdx) {
+      marker = '>'
+    }
+    if (t.cancelled) {
+      lines.push(marker + ' ' + dep + ' - ' + arr + ' | CANCELLED')
+    } else {
+      const tripTime = 'Trip time: ' + fmtDuration(t.durationMin) + 'h'
+      let transferWord = 'Transfers'
+      if (t.transfers === 1) {
+        transferWord = 'Transfer'
+      }
+      const transfers = t.transfers + 'x ' + transferWord
+      lines.push(marker + ' ' + dep + ' - ' + arr + ' | ' + tripTime + ' | ' + transfers)
+    }
+  }
+  return lines.join('\n')
+}
+
+function detailContent(): string {
+  const route = detailRoute
+  if (!route) {
+    return lensContent()
+  }
+  const count = visibleTripCount()
+  if (count === 0) {
+    return route.fromName + ' > ' + route.toName + '\n\nNo departures found'
+  }
+  if (tripIdx >= count) {
+    tripIdx = count - 1
+  }
+
+  const trip = detailTrips[tripIdx]
+  let lastArrDelay = 0
+  if (trip.legs[trip.legs.length - 1]) {
+    lastArrDelay = trip.legs[trip.legs.length - 1].arrivalDelayMin
+  }
+  const eta = hhmm(trip.arrival) + delayTag(lastArrDelay)
+  const lines: string[] = [route.fromName + ' > ' + route.toName + ' | ETA: ' + eta, '']
+  if (trip.cancelled) {
+    if (trip.cancellationReason) {
+      lines.push('CANCELLED — ' + trip.cancellationReason)
+    } else {
+      lines.push('CANCELLED')
+    }
+    lines.push('')
+  }
+  for (let i = 0; i < trip.legs.length; i++) {
+    const leg = trip.legs[i]
+    let modeTag = ''
+    if (leg.mode !== 'TRAIN' && modeLabel(leg.mode)) {
+      modeTag = modeLabel(leg.mode) + ' · '
+    }
+    let originPlatform = ''
+    if (leg.originTrack) {
+      originPlatform = ' | Platform: ' + leg.originTrack
+    }
+    let destPlatform = ''
+    if (leg.destinationTrack) {
+      destPlatform = ' | Platform: ' + leg.destinationTrack
+    }
+    lines.push(hhmm(leg.departure) + delayTag(leg.departureDelayMin) + ' ' + leg.origin + originPlatform)
+    lines.push('    ' + modeTag + 'Trip: ' + legDurationText(leg.durationMin))
+    lines.push(hhmm(leg.arrival) + delayTag(leg.arrivalDelayMin) + ' ' + leg.destination + destPlatform)
+    if (i < trip.legs.length - 1) {
+      const next = trip.legs[i + 1]
+      let gap = Math.round((new Date(next.departure).getTime() - new Date(leg.arrival).getTime()) / 60000)
+      if (gap < 0) {
+        gap = 0
+      }
+      lines.push('')
+      lines.push('Change (' + gap + ' min)')
+      lines.push('')
+    }
+  }
+  return lines.join('\n')
+}
+
+async function openTripList() {
+  const count = visibleJourneyCount()
+  if (count === 0) {
+    return
+  }
+  let index = journeyIdx
+  if (index > count - 1) {
+    index = count - 1
+  }
+  const route = savedRoutes[index]
+  view = 'list'
+  detailRoute = route
+  detailStatus = 'loading'
+  detailTrips = []
+  tripIdx = 0
+  await renderLens()
+  try {
+    const trips = await fetchTrips(route.fromCode, route.toCode, tripOpts())
+    detailTrips = trips
+    if (trips.length) {
+      detailStatus = 'ready'
+    } else {
+      detailStatus = 'error'
+      detailError = 'No departures found'
+    }
+  } catch (e) {
+    detailStatus = 'error'
+    if (e instanceof Error) {
+      detailError = e.message
+    } else {
+      detailError = String(e)
+    }
+  }
+  if (detailRoute === route) {
+    await renderLens()
+  }
+}
+
+async function refreshOpenTrips() {
+  const route = detailRoute
+  if (!route || (view !== 'list' && view !== 'detail')) {
+    return
+  }
+  let trips: Trip[]
+  try {
+    trips = await fetchTrips(route.fromCode, route.toCode, tripOpts())
+  } catch {
+    return
+  }
+  if (detailRoute !== route || (view !== 'list' && view !== 'detail')) {
+    return
+  }
+  if (!trips.length) {
+    return
+  }
+  let selectedDep = ''
+  if (detailTrips[tripIdx]) {
+    selectedDep = detailTrips[tripIdx].departure
+  }
+  detailTrips = trips
+  detailStatus = 'ready'
+  let cap = MAX_TRIP_OPTIONS
+  if (trips.length < cap) {
+    cap = trips.length
+  }
+  let newIdx = -1
+  if (selectedDep) {
+    for (let i = 0; i < trips.length; i++) {
+      if (trips[i].departure === selectedDep) {
+        newIdx = i
+        break
+      }
+    }
+  }
+  if (newIdx >= 0 && newIdx < cap) {
+    tripIdx = newIdx
+  } else if (tripIdx > cap - 1) {
+    tripIdx = cap - 1
+  }
+  await renderLens()
+}
+
+function openTripDetail() {
+  if (detailStatus !== 'ready' || visibleTripCount() === 0) {
+    return
+  }
+  view = 'detail'
+  renderLens().catch(function (err) {
+    console.error(err)
+  })
+}
+
+function cycleTrip(delta: number) {
+  if (detailStatus !== 'ready') {
+    return
+  }
+  const count = visibleTripCount()
+  if (count === 0) {
+    return
+  }
+  tripIdx = (tripIdx + delta + count) % count
+  renderLens().catch(function (err) {
+    console.error(err)
+  })
+}
+
+function goBack(): boolean {
+  if (view === 'detail') {
+    view = 'list'
+  } else if (view === 'list') {
+    view = 'home'
+    detailRoute = null
+    detailTrips = []
+  } else {
+    return false
+  }
+  renderLens().catch(function (err) {
+    console.error(err)
+  })
+  return true
+}
+
+let cleanedUp = false
+function cleanup() {
+  if (cleanedUp) {
+    return
+  }
+  cleanedUp = true
+  if (clockTimer) {
+    clearInterval(clockTimer)
+  }
+  if (tripsTimer) {
+    clearInterval(tripsTimer)
+  }
+  unsubscribe()
+}
+
+const unsubscribe = bridge.onEvenHubEvent(function (event) {
+  let sysType: number | null = null
+  if (event.sysEvent) {
+    if (event.sysEvent.eventType === undefined || event.sysEvent.eventType === null) {
+      sysType = OsEventTypeList.CLICK_EVENT
+    } else {
+      sysType = event.sysEvent.eventType
+    }
+  }
+  let textType: number | null = null
+  if (event.textEvent && event.textEvent.eventType !== undefined && event.textEvent.eventType !== null) {
+    textType = event.textEvent.eventType
+  }
+
+  if (sysType === OsEventTypeList.DOUBLE_CLICK_EVENT || textType === OsEventTypeList.DOUBLE_CLICK_EVENT) {
+    if (goBack()) {
+      return
+    }
+    cleanup()
+    bridge.shutDownPageContainer(1)
+    return
+  }
+  if (textType === OsEventTypeList.SCROLL_TOP_EVENT) {
+    if (view === 'home') {
+      cycleJourney(-1)
+    } else if (view === 'list') {
+      cycleTrip(-1)
+    }
+    return
+  }
+  if (textType === OsEventTypeList.SCROLL_BOTTOM_EVENT) {
+    if (view === 'home') {
+      cycleJourney(1)
+    } else if (view === 'list') {
+      cycleTrip(1)
+    }
+    return
+  }
+  if (sysType === OsEventTypeList.CLICK_EVENT) {
+    if (view === 'home') {
+      openTripList().catch(function (err) {
+        console.error(err)
+      })
+    } else if (view === 'list') {
+      openTripDetail()
+    }
+    return
+  }
+  if (sysType === OsEventTypeList.SYSTEM_EXIT_EVENT || sysType === OsEventTypeList.ABNORMAL_EXIT_EVENT) {
+    cleanup()
+  }
+})
+
+window.addEventListener('beforeunload', cleanup)
+
+function icon(name: string, opts: { size?: number; cls?: string; recolor?: boolean } = {}): string {
+  let size = 18
+  if (opts.size !== undefined) {
+    size = opts.size
+  }
+  let cls = ''
+  if (opts.cls) {
+    cls = opts.cls
+  }
+  let recolor = true
+  if (opts.recolor === false) {
+    recolor = false
+  }
+  let raw = ICON_RAW['./icons/' + name + '.svg']
+  if (!raw) {
+    console.warn('missing icon:', name)
+    return ''
+  }
+  raw = raw.replace(/<svg width="\d+" height="\d+"/, '<svg width="' + size + '" height="' + size + '"')
+  if (recolor) {
+    raw = raw.replace(/#232323/g, 'currentColor')
+  }
+  let classAttr = 'icon'
+  if (cls) {
+    classAttr = 'icon ' + cls
+  }
+  return '<span aria-hidden="true" class="' + classAttr + '">' + raw + '</span>'
+}
+
+const ARROW_ICON = icon('Guide System/Go', { size: 20 })
+const app = document.querySelector<HTMLDivElement>('#app')!
+app.innerHTML = `
+  <main class="planner">
+
+    <section class="route-card">
+      <div class="route-line"></div>
+
+      <label class="route-field">
+        <span class="route-marker">${icon('Navigate Feature Icon/Location', { size: 20 })}</span>
+        <input id="from" type="text" placeholder="From" autocomplete="off" role="combobox" aria-autocomplete="list" aria-expanded="false" class="route-input" />
+        <ul id="from-list" role="listbox" hidden class="autocomplete autocomplete--route"></ul>
+      </label>
+
+      <div class="route-divider"></div>
+
+      <label class="route-field">
+        <span class="route-marker">${icon('Navigate Feature Icon/End Location', { size: 20 })}</span>
+        <input id="to" type="text" placeholder="To" autocomplete="off" role="combobox" aria-autocomplete="list" aria-expanded="false" class="route-input" />
+        <ul id="to-list" role="listbox" hidden class="autocomplete autocomplete--route"></ul>
+      </label>
+
+      <button id="swap" type="button" aria-label="Swap origin and destination" class="swap-btn">${icon('Edit & Settings Icons/Switch', { size: 22 })}</button>
+    </section>
+
+    <div class="action-row">
+      <button id="dep-box" type="button" class="dep-box" aria-haspopup="dialog">
+        <span class="dep-box-text"><span id="dep-label">Departure:</span><span id="dep-value" class="muted"> now</span></span>
+        <span class="dep-box-icon muted">${icon('Feature & Function Icons/Time Counting', { size: 18 })}</span>
+      </button>
+    </div>
+
+    <div class="action-row">
+      <button id="plan" type="button" class="plan-btn">${ARROW_ICON}<span>Plan your journey</span></button>
+      <button id="clear-search" type="button" aria-label="Clear search" class="clear-btn">${icon('Edit & Settings Icons/Cross', { size: 18 })}</button>
+    </div>
+
+    <div id="home-sections">
+      <section class="panel panel--fav">
+        <div class="panel-title">Favorites</div>
+        <div id="fav-list"></div>
+        <div class="fav-add-row">
+          <span class="fav-search">
+            <input id="fav-input" type="text" placeholder="Search a station" autocomplete="off" role="combobox" aria-autocomplete="list" aria-expanded="false" class="fav-search-input" />
+            <ul id="fav-list-dropdown" role="listbox" hidden class="autocomplete"></ul>
+          </span>
+          <button id="fav-add" type="button" class="add-btn">Add</button>
+        </div>
+      </section>
+
+      <section class="panel panel--again">
+        <div class="panel-title">Plan again ...</div>
+        <div id="saved"></div>
+      </section>
+    </div>
+
+    <div id="results" class="results"></div>
+  </main>
+`
+
+const fromEl = document.getElementById('from') as HTMLInputElement | null
+const toEl = document.getElementById('to') as HTMLInputElement | null
+const swapBtn = document.getElementById('swap')
+if (swapBtn) {
+  swapBtn.addEventListener('click', function () {
+    if (!fromEl || !toEl) {
+      return
+    }
+    const tmpVal = fromEl.value
+    fromEl.value = toEl.value
+    toEl.value = tmpVal
+    const tmpCode = fromEl.dataset.code
+    if (toEl.dataset.code) {
+      fromEl.dataset.code = toEl.dataset.code
+    } else {
+      delete fromEl.dataset.code
+    }
+    if (tmpCode) {
+      toEl.dataset.code = tmpCode
+    } else {
+      delete toEl.dataset.code
+    }
+  })
+}
+
+let stationList: StationInfo[] = []
+fetchStations()
+  .then(function (list) {
+    stationList = list
+  })
+  .catch(function (err) {
+    console.error('station list load failed:', err)
+  })
+
+function rankStations(q: string): StationInfo[] {
+  const ql = q.toLowerCase()
+  const scored: { s: StationInfo; score: number }[] = []
+  for (const s of stationList) {
+    const name = s.name.toLowerCase()
+    let score = -1
+    if (name.startsWith(ql) || s.code.toLowerCase() === ql) {
+      score = 0
+    } else if (name.includes(ql)) {
+      score = 1
+    } else {
+      let synMatch = false
+      for (const syn of s.synonyms) {
+        if (syn.toLowerCase().includes(ql)) {
+          synMatch = true
+          break
+        }
+      }
+      if (synMatch) {
+        score = 2
+      }
+    }
+    if (score < 0) {
+      continue
+    }
+    if (s.country !== 'NL') {
+      score += 3
+    }
+    scored.push({ s: s, score: score })
+  }
+  scored.sort(function (a, b) {
+    if (a.score !== b.score) {
+      return a.score - b.score
+    }
+    return a.s.name.localeCompare(b.s.name)
+  })
+  const result: StationInfo[] = []
+  for (let i = 0; i < scored.length && i < 7; i++) {
+    result.push(scored[i].s)
+  }
+  return result
+}
+
+function attachAutocomplete(input: HTMLInputElement, list: HTMLUListElement, saveable: boolean = false) {
+  let items: StationInfo[] = []
+  let active = -1
+
+  function close() {
+    list.hidden = true
+    input.setAttribute('aria-expanded', 'false')
+    items = []
+    active = -1
+  }
+  function setActive(i: number) {
+    active = i
+    const children = list.children
+    for (let idx = 0; idx < children.length; idx++) {
+      const li = children[idx] as HTMLElement
+      if (idx === i) {
+        li.classList.add('active')
+      } else {
+        li.classList.remove('active')
+      }
+    }
+  }
+  function choose(st: StationInfo) {
+    input.value = st.name
+    input.dataset.code = st.code
+    close()
+  }
+  function toggleFavorite(st: StationInfo, starBtn: HTMLElement) {
+    if (isFavorite(st.code)) {
+      removeFavorite(st.code)
+    } else {
+      addFavorite({ code: st.code, name: st.name })
+    }
+    starBtn.innerHTML = starSvg(isFavorite(st.code))
+  }
+  function render(matches: StationInfo[]) {
+    items = matches
+    active = -1
+    if (matches.length === 0) {
+      close()
+      return
+    }
+    list.innerHTML = ''
+    for (let i = 0; i < matches.length; i++) {
+      const st = matches[i]
+      const index = i
+      const li = document.createElement('li')
+      li.setAttribute('role', 'option')
+      li.className = 'option'
+      const name = document.createElement('span')
+      name.textContent = st.name
+      name.className = 'option-name'
+      li.appendChild(name)
+      if (st.country && st.country !== 'NL') {
+        const c = document.createElement('span')
+        c.textContent = st.country
+        c.className = 'option-country'
+        li.appendChild(c)
+      }
+      if (saveable) {
+        const star = document.createElement('button')
+        star.type = 'button'
+        star.setAttribute('aria-label', 'Save to favorites')
+        star.className = 'option-star'
+        star.innerHTML = starSvg(isFavorite(st.code))
+        star.addEventListener('mousedown', function (e) {
+          e.preventDefault()
+          e.stopPropagation()
+          toggleFavorite(st, star)
+        })
+        li.appendChild(star)
+      }
+      li.addEventListener('mousedown', function (e) {
+        e.preventDefault()
+        choose(st)
+      })
+      li.addEventListener('mouseenter', function () {
+        setActive(index)
+      })
+      list.appendChild(li)
+    }
+    list.hidden = false
+    input.setAttribute('aria-expanded', 'true')
+  }
+
+  input.addEventListener('input', function () {
+    delete input.dataset.code
+    const q = input.value.trim()
+    if (q.length < 1) {
+      close()
+      return
+    }
+    render(rankStations(q))
+  })
+  input.addEventListener('keydown', function (e) {
+    if (list.hidden || items.length === 0) {
+      return
+    }
+    if (e.key === 'ArrowDown') {
+      e.preventDefault()
+      setActive((active + 1) % items.length)
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault()
+      setActive((active - 1 + items.length) % items.length)
+    } else if (e.key === 'Enter') {
+      e.preventDefault()
+      let idx = active
+      if (idx < 0) {
+        idx = 0
+      }
+      choose(items[idx])
+    } else if (e.key === 'Escape') {
+      close()
+    }
+  })
+  input.addEventListener('blur', function () {
+    setTimeout(close, 120)
+  })
+}
+
+const fromList = document.getElementById('from-list') as HTMLUListElement | null
+const toList = document.getElementById('to-list') as HTMLUListElement | null
+const favInput = document.getElementById('fav-input') as HTMLInputElement | null
+const favListDd = document.getElementById('fav-list-dropdown') as HTMLUListElement | null
+if (fromEl && fromList) {
+  attachAutocomplete(fromEl, fromList, true)
+}
+if (toEl && toList) {
+  attachAutocomplete(toEl, toList, true)
+}
+if (favInput && favListDd) {
+  attachAutocomplete(favInput, favListDd)
+}
+
+function resolveCode(input: HTMLInputElement): string | null {
+  if (input.dataset.code) {
+    return input.dataset.code
+  }
+  if (!input.value.trim()) {
+    return null
+  }
+  const ranked = rankStations(input.value.trim())
+  if (ranked[0]) {
+    return ranked[0].code
+  }
+  return null
+}
+
+function fmtTime(iso: string): string {
+  if (iso) {
+    return hhmm(iso)
+  }
+  return '--:--'
+}
+
+function fmtDuration(min: number): string {
+  const h = Math.floor(min / 60)
+  const m = min % 60
+  let mm = String(m)
+  if (mm.length < 2) {
+    mm = '0' + mm
+  }
+  return h + ':' + mm
+}
+
+const CLOCK_ICON = icon('Feature & Function Icons/Time Counting', { size: 16, cls: 'muted' })
+const TRANSFER_ICON = icon('Edit & Settings Icons/Switch', { size: 16, cls: 'muted' })
+const MENU_DOTS = icon('Status Icons/More', { size: 20, cls: 'muted' })
+
+function modeIcon(mode: TravelMode, size: number): string {
+  if (mode === 'BUS') {
+    return icon('Navigate Feature Icon/Bus', { size: size })
+  }
+  if (mode === 'WALK') {
+    return icon('Navigate Feature Icon/Walk', { size: size })
+  }
+  return icon('Navigate Feature Icon/Train', { size: size })
+}
+
+function modeLabel(mode: TravelMode): string {
+  if (mode === 'BUS') {
+    return 'Bus'
+  }
+  if (mode === 'TRAM') {
+    return 'Tram'
+  }
+  if (mode === 'METRO') {
+    return 'Metro'
+  }
+  if (mode === 'FERRY') {
+    return 'Ferry'
+  }
+  if (mode === 'WALK') {
+    return 'Walk'
+  }
+  return ''
+}
+
+function legBadgeLabel(leg: TripLeg): string {
+  if (leg.category) {
+    return leg.category
+  }
+  const label = modeLabel(leg.mode)
+  if (label) {
+    return label
+  }
+  return 'Train'
+}
+
+function iconSvg(kind: FavIcon, size: number): string {
+  if (kind === 'home') {
+    return icon('Navigate Feature Icon/Home Address', { size: size })
+  }
+  if (kind === 'work') {
+    return icon('Navigate Feature Icon/Office Address', { size: size })
+  }
+  return icon('Navigate Feature Icon/Train', { size: size })
+}
+
+function serviceBadges(legs: TripLeg[]): string {
+  let html = ''
+  for (const l of legs) {
+    if (l.mode === 'WALK') {
+      continue
+    }
+    html += '<span class="badge">' + modeIcon(l.mode, 18) + legBadgeLabel(l) + '</span>'
+  }
+  return html
+}
+
+function crowdBadge(crowd: string): string {
+  let n = 0
+  let cls = ''
+  let label = ''
+  if (crowd === 'LOW') {
+    n = 1
+    cls = 'crowd--low'
+    label = 'Quiet'
+  } else if (crowd === 'MEDIUM') {
+    n = 2
+    cls = 'crowd--medium'
+    label = 'Busy'
+  } else if (crowd === 'HIGH') {
+    n = 3
+    cls = 'crowd--high'
+    label = 'Very busy'
+  } else {
+    return ''
+  }
+  const person = icon('Feature & Function Icons/Account', { size: 16 })
+  let people = ''
+  for (let i = 0; i < n; i++) {
+    people += person
+  }
+  return '<span title="' + label + '" aria-label="' + label + '" class="crowd ' + cls + '">' + people + '</span>'
+}
+
+const results = document.getElementById('results') as HTMLDivElement | null
+function setResults(html: string) {
+  if (results) {
+    results.innerHTML = html
+  }
+}
+
+function delayBadge(min: number): string {
+  if (min > 0) {
+    return '<span class="delay"> +' + min + '</span>'
+  }
+  return ''
+}
+
+function metaSpan(iconHtml: string, text: string): string {
+  return '<span class="meta">' + iconHtml + text + '</span>'
+}
+
+function gapMinutes(a: string, b: string): number {
+  let g = Math.round((new Date(b).getTime() - new Date(a).getTime()) / 60000)
+  if (g < 0) {
+    g = 0
+  }
+  return g
+}
+
+function renderTrips(trips: Trip[]) {
+  if (!results) {
+    return
+  }
+  results.innerHTML = ''
+  if (trips.length === 0) {
+    setResults('<p class="notice">No journeys found.</p>')
+    return
+  }
+  for (let idx = 0; idx < trips.length; idx++) {
+    const trip = trips[idx]
+    const thisIdx = idx
+    const services = serviceBadges(trip.legs)
+
+    const card = document.createElement('div')
+    card.dataset.idx = String(idx)
+    if (trip.cancelled) {
+      card.className = 'trip-card cancelled'
+    } else {
+      card.className = 'trip-card'
+    }
+
+    let firstDelay = 0
+    if (trip.legs[0]) {
+      firstDelay = trip.legs[0].departureDelayMin
+    }
+    let lastDelay = 0
+    if (trip.legs[trip.legs.length - 1]) {
+      lastDelay = trip.legs[trip.legs.length - 1].arrivalDelayMin
+    }
+    let badgesHtml = ''
+    if (services) {
+      badgesHtml = '<div class="badges">' + services + '</div>'
+    }
+    let cancelledHtml = ''
+    if (trip.cancelled) {
+      let reason = ''
+      if (trip.cancellationReason) {
+        reason = ' - ' + trip.cancellationReason
+      }
+      cancelledHtml = '<div class="trip-cancelled">Cancelled' + reason + '</div>'
+    }
+
+    card.innerHTML = `
+      <div class="trip-head">
+        <span class="trip-time">
+          ${fmtTime(trip.departure)}${delayBadge(firstDelay)}
+          <span class="muted"> - </span>
+          ${fmtTime(trip.arrival)}${delayBadge(lastDelay)}
+        </span>
+        <span class="trip-meta">
+          ${metaSpan(CLOCK_ICON, fmtDuration(trip.durationMin))}
+          ${metaSpan(TRANSFER_ICON, trip.transfers + 'x')}
+          ${crowdBadge(trip.crowd)}
+        </span>
+      </div>
+      ${badgesHtml}
+      ${cancelledHtml}
+    `
+    card.addEventListener('click', function () {
+      const cards = results.querySelectorAll<HTMLDivElement>('[data-idx]')
+      cards.forEach(function (el) {
+        el.classList.remove('selected')
+      })
+      card.classList.add('selected')
+      showDetail(trip, thisIdx)
+    })
+    results.appendChild(card)
+  }
+}
+
+const BACK_ICON = icon('Guide System/Back', { size: 24 })
+const CHEVRON_ICON = icon('Guide System/Chevron - Drill-in', { size: 18, cls: 'muted' })
+const WALK_ICON = icon('Navigate Feature Icon/Walk', { size: 20, cls: 'muted' })
+
+function modeSquare(mode: TravelMode): string {
+  return '<span class="train-square">' + modeIcon(mode, 24) + '</span>'
+}
+
+function legDurationText(min: number): string {
+  if (min >= 60) {
+    const h = Math.floor(min / 60)
+    let mm = String(min % 60)
+    if (mm.length < 2) {
+      mm = '0' + mm
+    }
+    return h + ':' + mm + ' h'
+  }
+  return min + ' min'
+}
+
+function fmtDateHeader(iso: string): string {
+  const d = new Date(iso)
+  const dateStr = d.toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })
+  if (d.toDateString() === new Date().toDateString()) {
+    return 'Today, ' + dateStr
+  }
+  return dateStr
+}
+
+function crowdInline(crowd: string): string {
+  let text = 'Crowdedness unknown'
+  let cls = 'ctext--unknown'
+  if (crowd === 'LOW') {
+    text = 'Calm'
+    cls = 'ctext--low'
+  } else if (crowd === 'MEDIUM') {
+    text = 'Busy'
+    cls = 'ctext--medium'
+  } else if (crowd === 'HIGH') {
+    text = 'Crowded'
+    cls = 'ctext--high'
+  }
+  return '<span class="' + cls + '">' + text + '</span>'
+}
+
+function platformBadge(track: string): string {
+  if (!track) {
+    return ''
+  }
+  return '<span class="platform">' + track + '</span>'
+}
+
+const STATION_DOT = '<span class="station-dot"></span>'
+
+function legCard(leg: TripLeg): string {
+  let stopWord = 'intermediate stops'
+  if (leg.intermediateStops === 1) {
+    stopWord = 'intermediate stop'
+  }
+  const stops = leg.intermediateStops + ' ' + stopWord
+  let exitHtml = ''
+  if (leg.exitSide) {
+    exitHtml = '<span class="leg-exit">Exit side ' + leg.exitSide.toLowerCase() + '</span>'
+  }
+  return `
+    <div class="leg">
+      <div class="leg-times">
+        <span class="leg-time">${fmtTime(leg.departure)}</span>
+        <span class="leg-train">
+          ${modeSquare(leg.mode)}
+          <span class="leg-dur">${legDurationText(leg.durationMin)}</span>
+        </span>
+        <span class="leg-time">${fmtTime(leg.arrival)}</span>
+      </div>
+      <div class="leg-rail">
+        ${STATION_DOT}
+        <span class="leg-rail-line"></span>
+        ${STATION_DOT}
+      </div>
+      <div class="leg-body">
+        <div class="leg-stop">
+          <span class="leg-station">${leg.origin}</span>
+          ${platformBadge(leg.originTrack)}
+        </div>
+        <div class="leg-service">
+          <div class="leg-service-text">
+            <div class="leg-service-name">${leg.displayName}</div>
+            <div class="leg-service-dir">to ${leg.direction}</div>
+            <div class="leg-service-meta">${crowdInline(leg.crowd)} · ${stops}</div>
+          </div>
+          ${CHEVRON_ICON}
+        </div>
+        <div class="leg-stop">
+          <span>
+            <span class="leg-station">${leg.destination}</span>
+            ${exitHtml}
+          </span>
+          ${platformBadge(leg.destinationTrack)}
+        </div>
+      </div>
+    </div>`
+}
+
+function transferBlock(prev: TripLeg, next: TripLeg): string {
+  const total = gapMinutes(prev.arrival, next.departure)
+  const walk = prev.walkToNextMin
+  let wait: number | null = null
+  if (walk !== null) {
+    wait = total - walk
+    if (wait < 0) {
+      wait = 0
+    }
+  }
+  let walkLabel = total
+  if (walk !== null) {
+    walkLabel = walk
+  }
+  let walkText = 'Walk to transfer'
+  if (next.originTrack) {
+    walkText = 'Walk to platform ' + next.originTrack
+  }
+  let checkInOut = ''
+  if (prev.operator && next.operator && prev.operator !== next.operator) {
+    checkInOut = 'Check out/in: ' + prev.operator.split(' ')[0] + ' - ' + next.operator.split(' ')[0]
+  }
+
+  function row(left: string, text: string): string {
+    return `
+    <div class="xfer-row">
+      <span class="xfer-left">${left}</span>
+      <span class="xfer-text">${text}</span>
+    </div>`
+  }
+
+  let rows = row(walkLabel + ' min', walkText)
+  if (checkInOut) {
+    rows += row(WALK_ICON, checkInOut)
+  }
+  if (wait !== null && wait > 0) {
+    rows += row(wait + ' min', 'Wait')
+  }
+
+  return `
+    <div class="xfer">
+      <div class="xfer-line"></div>
+      ${rows}
+    </div>`
+}
+
+const detailView = document.createElement('div')
+detailView.id = 'detail'
+detailView.hidden = true
+detailView.className = 'overlay'
+document.body.appendChild(detailView)
+
+function starSvg(filled: boolean, size: number = 20): string {
+  if (filled) {
+    return icon('Status Icons/Fav', { size: size, recolor: false })
+  }
+  return icon('Status Icons/Unfav', { size: size, cls: 'muted' })
+}
+
+function nameForCode(code: string): string {
+  for (const s of stationList) {
+    if (s.code === code) {
+      return s.name
+    }
+  }
+  return code
+}
+
+function buildSummary(trip: Trip): string {
+  let badges = ''
+  for (let i = 0; i < trip.legs.length; i++) {
+    const l = trip.legs[i]
+    if (l.mode !== 'WALK') {
+      badges += '<span class="badge">' + modeIcon(l.mode, 18) + legBadgeLabel(l) + '</span>'
+    }
+    if (i < trip.legs.length - 1) {
+      const gap = gapMinutes(l.arrival, trip.legs[i + 1].departure)
+      badges += '<span class="gap-badge">' + gap + '<span>min</span></span>'
+    }
+  }
+  let summaryClass = 'summary'
+  if (trip.cancelled) {
+    summaryClass = 'summary cancelled'
+  }
+  let cancelledHtml = ''
+  if (trip.cancelled) {
+    let reason = ''
+    if (trip.cancellationReason) {
+      reason = ' — ' + trip.cancellationReason
+    }
+    cancelledHtml = '<div class="trip-cancelled">Cancelled' + reason + '</div>'
+  }
+  return `
+    <div class="${summaryClass}">
+      <div class="trip-head">
+        <span class="trip-time">
+          ${fmtTime(trip.departure)} <span class="muted">-</span> ${fmtTime(trip.arrival)}
+        </span>
+        <span class="trip-meta">
+          ${metaSpan(TRANSFER_ICON, trip.transfers + 'x')}
+          ${metaSpan(CLOCK_ICON, fmtDuration(trip.durationMin))}
+        </span>
+      </div>
+      <div class="badges">${badges}</div>
+      ${cancelledHtml}
+    </div>`
+}
+
+function buildDetail(trip: Trip): string {
+  let from = ''
+  if (trip.legs[0]) {
+    from = trip.legs[0].origin
+  }
+  let to = ''
+  if (trip.legs[trip.legs.length - 1]) {
+    to = trip.legs[trip.legs.length - 1].destination
+  }
+  let route = ''
+  for (let i = 0; i < trip.legs.length; i++) {
+    const leg = trip.legs[i]
+    route += legCard(leg)
+    if (i < trip.legs.length - 1) {
+      route += transferBlock(leg, trip.legs[i + 1])
+    }
+  }
+  return `
+    <header class="detail-header">
+      <button id="detail-back" type="button" aria-label="Back" class="icon-btn">${BACK_ICON}</button>
+      <div class="detail-title">
+        <div class="detail-title-main">${from} - ${to}</div>
+        <div class="detail-title-sub">${fmtDateHeader(trip.departure)}</div>
+      </div>
+      <span class="header-spacer"></span>
+    </header>
+    <main class="detail-main">
+      ${buildSummary(trip)}
+      <div class="spacer-8"></div>
+      ${route}
+    </main>`
+}
+
+function showDetail(trip: Trip, idx: number = detailTrips.indexOf(trip)) {
+  detailView.innerHTML = buildDetail(trip)
+  const backBtn = detailView.querySelector<HTMLButtonElement>('#detail-back')
+  if (backBtn) {
+    backBtn.addEventListener('click', function () {
+      detailView.hidden = true
+      if (view === 'detail') {
+        view = 'list'
+        renderLens().catch(function (err) {
+          console.error(err)
+        })
+      }
+    })
+  }
+  detailView.scrollTop = 0
+  detailView.hidden = false
+  mirrorDetailToLens(idx)
+}
+
+function mirrorHomeToLens() {
+  view = 'home'
+  detailRoute = null
+  detailTrips = []
+  renderLens().catch(function (err) {
+    console.error(err)
+  })
+}
+
+function mirrorDetailToLens(idx: number) {
+  if (idx < 0 || idx >= detailTrips.length) {
+    return
+  }
+  tripIdx = idx
+  view = 'detail'
+  renderLens().catch(function (err) {
+    console.error(err)
+  })
+}
+
+const errorModal = document.createElement('div')
+errorModal.id = 'error-modal'
+errorModal.hidden = true
+errorModal.className = 'modal-backdrop'
+errorModal.innerHTML = `
+  <div class="modal-card" role="alertdialog" aria-modal="true">
+    <p class="modal-text"></p>
+    <button type="button" class="modal-ok">OK</button>
+  </div>`
+document.body.appendChild(errorModal)
+
+const errorModalText = errorModal.querySelector<HTMLParagraphElement>('.modal-text')!
+function hideError() {
+  errorModal.hidden = true
+}
+function showError(message: string) {
+  errorModalText.textContent = message
+  errorModal.hidden = false
+  const okBtn = errorModal.querySelector<HTMLButtonElement>('.modal-ok')
+  if (okBtn) {
+    okBtn.focus()
+  }
+}
+const modalOk = errorModal.querySelector<HTMLButtonElement>('.modal-ok')
+if (modalOk) {
+  modalOk.addEventListener('click', hideError)
+}
+errorModal.addEventListener('click', function (e) {
+  if (e.target === errorModal) {
+    hideError()
+  }
+})
+document.addEventListener('keydown', function (e) {
+  if (e.key === 'Escape' && !errorModal.hidden) {
+    hideError()
+  }
+})
+
+// ---- Departure / Arrival time picker ----
+
+const DAY_MS = 86400000
+const WHEEL_ITEM_H = 56
+
+function startOfDay(d: Date): Date {
+  const c = new Date(d)
+  c.setHours(0, 0, 0, 0)
+  return c
+}
+
+function sameDay(a: Date, b: Date): boolean {
+  return startOfDay(a).getTime() === startOfDay(b).getTime()
+}
+
+function dayLabel(d: Date): string {
+  const today = startOfDay(new Date())
+  const diff = Math.round((startOfDay(d).getTime() - today.getTime()) / DAY_MS)
+  if (diff === 0) {
+    return 'Today'
+  }
+  if (diff === 1) {
+    return 'Tomorrow'
+  }
+  if (diff === -1) {
+    return 'Yesterday'
+  }
+  return d.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' })
+}
+
+function formatPlanValue(): string {
+  if (!planDateTime) {
+    return ' now'
+  }
+  const time = planDateTime.toLocaleTimeString('nl-NL', { hour: '2-digit', minute: '2-digit' })
+  return ' ' + dayLabel(planDateTime) + ' ' + time
+}
+
+const depLabelEl = document.getElementById('dep-label')
+const depValueEl = document.getElementById('dep-value')
+
+function updateDepBox() {
+  if (depLabelEl) {
+    if (planTimeMode === 'arrival') {
+      depLabelEl.textContent = 'Arrival:'
+    } else {
+      depLabelEl.textContent = 'Departure:'
+    }
+  }
+  if (depValueEl) {
+    depValueEl.textContent = formatPlanValue()
+  }
+}
+
+const CHEVRON_LEFT = icon('Guide System/Chevron - Back', { size: 22 })
+const CHEVRON_RIGHT = icon('Guide System/Chevron - Drill-in', { size: 22 })
+
+const timeModal = document.createElement('div')
+timeModal.id = 'time-modal'
+timeModal.hidden = true
+timeModal.className = 'modal-backdrop'
+timeModal.innerHTML = `
+  <div class="time-card" role="dialog" aria-modal="true" aria-label="Choose time">
+    <div class="time-tabs">
+      <button id="tab-dep" type="button" class="time-tab">Departure</button>
+      <button id="tab-arr" type="button" class="time-tab">Arrival</button>
+    </div>
+    <div class="time-picker">
+      <div class="wheels">
+        <div class="wheel-overlay"></div>
+        <div id="wheel-hour" class="wheel" aria-label="Hour"></div>
+        <span class="wheel-colon">:</span>
+        <div id="wheel-min" class="wheel" aria-label="Minute"></div>
+      </div>
+      <button id="time-now" type="button" class="time-now">Now</button>
+    </div>
+    <div class="time-date">
+      <button id="date-prev" type="button" class="date-arrow" aria-label="Previous day">${CHEVRON_LEFT}</button>
+      <span id="date-label" class="date-label">Today</span>
+      <button id="date-next" type="button" class="date-arrow" aria-label="Next day">${CHEVRON_RIGHT}</button>
+    </div>
+    <div class="time-actions">
+      <button id="time-cancel" type="button" class="time-cancel">Cancel</button>
+      <button id="time-done" type="button" class="time-done">Done</button>
+    </div>
+  </div>`
+document.body.appendChild(timeModal)
+
+// Transient picker state, copied from the committed selection on open.
+let pickerMode: TimeMode = 'departure'
+let pickerDate: Date = startOfDay(new Date())
+let pickerIsNow = true
+
+const hourEl = timeModal.querySelector<HTMLDivElement>('#wheel-hour')!
+const minEl = timeModal.querySelector<HTMLDivElement>('#wheel-min')!
+const tabDep = timeModal.querySelector<HTMLButtonElement>('#tab-dep')!
+const tabArr = timeModal.querySelector<HTMLButtonElement>('#tab-arr')!
+const nowBtn = timeModal.querySelector<HTMLButtonElement>('#time-now')!
+const dateLabelEl = timeModal.querySelector<HTMLSpanElement>('#date-label')!
+const datePrev = timeModal.querySelector<HTMLButtonElement>('#date-prev')!
+const dateNext = timeModal.querySelector<HTMLButtonElement>('#date-next')!
+
+function clearNow() {
+  if (pickerIsNow) {
+    pickerIsNow = false
+    updateNowState()
+  }
+}
+
+interface Wheel {
+  set: (i: number) => void
+  get: () => number
+}
+
+function buildWheel(el: HTMLElement, count: number): Wheel {
+  el.innerHTML = ''
+  const top = document.createElement('div')
+  top.className = 'wheel-spacer'
+  el.appendChild(top)
+  for (let i = 0; i < count; i++) {
+    const item = document.createElement('div')
+    item.className = 'wheel-item'
+    let txt = String(i)
+    if (txt.length < 2) {
+      txt = '0' + txt
+    }
+    item.textContent = txt
+    el.appendChild(item)
+  }
+  const bot = document.createElement('div')
+  bot.className = 'wheel-spacer'
+  el.appendChild(bot)
+
+  function clampIdx(i: number): number {
+    if (i < 0) {
+      return 0
+    }
+    if (i > count - 1) {
+      return count - 1
+    }
+    return i
+  }
+  function markCenter() {
+    const idx = clampIdx(Math.round(el.scrollTop / WHEEL_ITEM_H))
+    for (let i = 0; i < count; i++) {
+      const c = el.children[i + 1] as HTMLElement
+      if (i === idx) {
+        c.classList.add('sel')
+      } else {
+        c.classList.remove('sel')
+      }
+    }
+  }
+  el.addEventListener('scroll', markCenter)
+  el.addEventListener('pointerdown', clearNow)
+  el.addEventListener('wheel', clearNow)
+  el.addEventListener('touchstart', clearNow, { passive: true })
+
+  return {
+    set: function (i: number) {
+      el.scrollTop = clampIdx(i) * WHEEL_ITEM_H
+      markCenter()
+    },
+    get: function (): number {
+      return clampIdx(Math.round(el.scrollTop / WHEEL_ITEM_H))
+    },
+  }
+}
+
+const hourWheel = buildWheel(hourEl, 24)
+const minWheel = buildWheel(minEl, 60)
+
+function updateTabs() {
+  if (pickerMode === 'departure') {
+    tabDep.classList.add('sel')
+    tabArr.classList.remove('sel')
+  } else {
+    tabArr.classList.add('sel')
+    tabDep.classList.remove('sel')
+  }
+}
+
+function updateNowState() {
+  if (pickerIsNow) {
+    nowBtn.classList.add('sel')
+  } else {
+    nowBtn.classList.remove('sel')
+  }
+}
+
+function updateDateRow() {
+  dateLabelEl.textContent = dayLabel(pickerDate)
+  // Never plan a journey in the past.
+  datePrev.disabled = sameDay(pickerDate, new Date())
+}
+
+function openTimeModal() {
+  pickerMode = planTimeMode
+  let base = new Date()
+  if (planDateTime) {
+    base = new Date(planDateTime)
+  }
+  pickerDate = startOfDay(base)
+  pickerIsNow = !planDateTime
+  updateTabs()
+  updateNowState()
+  updateDateRow()
+  timeModal.hidden = false
+  // Wheels can only be scrolled once the modal is visible (laid out).
+  hourWheel.set(base.getHours())
+  minWheel.set(base.getMinutes())
+}
+
+function closeTimeModal() {
+  timeModal.hidden = true
+}
+
+function setNow() {
+  pickerIsNow = true
+  const now = new Date()
+  pickerDate = startOfDay(now)
+  hourWheel.set(now.getHours())
+  minWheel.set(now.getMinutes())
+  updateNowState()
+  updateDateRow()
+}
+
+function commitTime() {
+  planTimeMode = pickerMode
+  if (pickerIsNow) {
+    planDateTime = null
+  } else {
+    const d = new Date(pickerDate)
+    d.setHours(hourWheel.get(), minWheel.get(), 0, 0)
+    planDateTime = d
+  }
+  closeTimeModal()
+  updateDepBox()
+  // If a journey is already on screen, re-plan it with the new time.
+  if (results && results.children.length > 0) {
+    planJourney().catch(function (err) {
+      console.error(err)
+    })
+  } else if (view !== 'home') {
+    // A list/detail is mirrored to the glasses lens — refresh it too.
+    openTripList().catch(function (err) {
+      console.error(err)
+    })
+  }
+}
+
+tabDep.addEventListener('click', function () {
+  pickerMode = 'departure'
+  updateTabs()
+})
+tabArr.addEventListener('click', function () {
+  pickerMode = 'arrival'
+  updateTabs()
+})
+nowBtn.addEventListener('click', setNow)
+datePrev.addEventListener('click', function () {
+  if (sameDay(pickerDate, new Date())) {
+    return
+  }
+  pickerDate = startOfDay(new Date(pickerDate.getTime() - DAY_MS))
+  clearNow()
+  updateDateRow()
+})
+dateNext.addEventListener('click', function () {
+  pickerDate = startOfDay(new Date(pickerDate.getTime() + DAY_MS))
+  clearNow()
+  updateDateRow()
+})
+const timeCancel = timeModal.querySelector<HTMLButtonElement>('#time-cancel')
+if (timeCancel) {
+  timeCancel.addEventListener('click', closeTimeModal)
+}
+const timeDone = timeModal.querySelector<HTMLButtonElement>('#time-done')
+if (timeDone) {
+  timeDone.addEventListener('click', commitTime)
+}
+timeModal.addEventListener('click', function (e) {
+  if (e.target === timeModal) {
+    closeTimeModal()
+  }
+})
+
+const depBox = document.getElementById('dep-box')
+if (depBox) {
+  depBox.addEventListener('click', openTimeModal)
+}
+updateDepBox()
+
+async function planJourney() {
+  if (!fromEl || !toEl) {
+    return
+  }
+  if (!stationList.length) {
+    setResults('<p class="notice">Loading stations…</p>')
+    return
+  }
+  const fromCode = resolveCode(fromEl)
+  const toCode = resolveCode(toEl)
+  if (!fromCode || !toCode) {
+    showError('Pick both a From and To station.')
+    return
+  }
+  if (fromCode === toCode) {
+    showError('From and To are the same station.')
+    return
+  }
+  showPlanAgain(false)
+  setResults('<p class="notice">Planning…</p>')
+  const route: SavedRoute = {
+    fromCode: fromCode,
+    fromName: nameForCode(fromCode),
+    toCode: toCode,
+    toName: nameForCode(toCode),
+  }
+  detailRoute = route
+  detailTrips = []
+  detailStatus = 'loading'
+  tripIdx = 0
+  view = 'list'
+  renderLens().catch(function (err) {
+    console.error(err)
+  })
+  try {
+    const trips = await fetchTrips(fromCode, toCode, tripOpts())
+    renderTrips(trips)
+    if (detailRoute === route) {
+      detailTrips = trips
+      if (trips.length) {
+        detailStatus = 'ready'
+      } else {
+        detailStatus = 'error'
+        detailError = 'No departures found'
+      }
+      renderLens().catch(function (err) {
+        console.error(err)
+      })
+    }
+    addRoute(route)
+  } catch (e) {
+    let msg = ''
+    if (e instanceof Error) {
+      msg = e.message
+    } else {
+      msg = String(e)
+    }
+    setResults('')
+    showPlanAgain(true)
+    showError('Could not plan journey: ' + msg)
+    if (detailRoute === route) {
+      detailStatus = 'error'
+      detailError = msg
+      renderLens().catch(function (err) {
+        console.error(err)
+      })
+    }
+  }
+}
+
+const planBtn = document.getElementById('plan')
+if (planBtn) {
+  planBtn.addEventListener('click', function () {
+    planJourney().catch(function (err) {
+      console.error(err)
+    })
+  })
+}
+
+const clearBtn = document.getElementById('clear-search')
+if (clearBtn) {
+  clearBtn.addEventListener('click', function () {
+    if (fromEl) {
+      fromEl.value = ''
+      delete fromEl.dataset.code
+    }
+    if (toEl) {
+      toEl.value = ''
+      delete toEl.dataset.code
+    }
+    setResults('')
+    showPlanAgain(true)
+    mirrorHomeToLens()
+    if (fromEl) {
+      fromEl.focus()
+    }
+  })
+}
+
+function onFieldEdited() {
+  if (results && results.children.length) {
+    results.innerHTML = ''
+    showPlanAgain(true)
+    mirrorHomeToLens()
+  }
+}
+if (fromEl) {
+  fromEl.addEventListener('input', onFieldEdited)
+}
+if (toEl) {
+  toEl.addEventListener('input', onFieldEdited)
+}
+
+function selectSavedRoute(r: SavedRoute) {
+  if (!fromEl || !toEl) {
+    return
+  }
+  fromEl.value = r.fromName
+  fromEl.dataset.code = r.fromCode
+  toEl.value = r.toName
+  toEl.dataset.code = r.toCode
+  planJourney().catch(function (err) {
+    console.error(err)
+  })
+}
+
+function showPlanAgain(show: boolean) {
+  const el = document.getElementById('home-sections')
+  if (el) {
+    el.hidden = !show
+  }
+}
+
+function renderSavedRoutes() {
+  const el = document.getElementById('saved')
+  if (!el) {
+    return
+  }
+  if (savedRoutes.length === 0) {
+    el.innerHTML = '<div class="empty-note">You have no recently planned journeys</div>'
+    return
+  }
+  let html = ''
+  for (let i = 0; i < savedRoutes.length; i++) {
+    const r = savedRoutes[i]
+    html +=
+      '<div class="chip row-item row-divider" data-ri="' + i + '">' +
+      '<span class="row-name">' + r.fromName + ' ' + icon('Guide System/Go', { size: 15, cls: 'muted' }) + ' ' + r.toName + '</span>' +
+      '<button class="del menu-btn" data-ri="' + i + '" type="button" aria-label="Remove route">' + MENU_DOTS + '</button>' +
+      '</div>'
+  }
+  el.innerHTML = html
+  const chips = el.querySelectorAll<HTMLElement>('.chip')
+  chips.forEach(function (row) {
+    row.addEventListener('click', function () {
+      selectSavedRoute(savedRoutes[Number(row.dataset.ri)])
+    })
+  })
+  const dels = el.querySelectorAll<HTMLElement>('.del')
+  dels.forEach(function (del) {
+    del.addEventListener('click', function (e) {
+      e.stopPropagation()
+      const r = savedRoutes[Number(del.dataset.ri)]
+      if (r) {
+        removeRoute(r.fromCode, r.toCode)
+      }
+    })
+  })
+}
+renderSavedRoutes()
+
+function useFavorite(f: Favorite) {
+  if (!toEl) {
+    return
+  }
+  toEl.value = f.name
+  toEl.dataset.code = f.code
+}
+
+function renderFavorites() {
+  const el = document.getElementById('fav-list')
+  if (!el) {
+    return
+  }
+  if (favorites.length === 0) {
+    el.innerHTML = '<div class="empty-note row-divider">Save favorite locations and plan directly.</div>'
+    return
+  }
+  let html = ''
+  for (let i = 0; i < favorites.length; i++) {
+    const f = favorites[i]
+    html +=
+      '<div class="fav row-item row-divider" data-fi="' + i + '">' +
+      '<span class="row-icon">' + iconSvg(f.icon, 22) + '</span>' +
+      '<span class="row-name">' + f.label + '</span>' +
+      '<button class="favmenu menu-btn" data-fi="' + i + '" type="button" aria-label="Edit favorite">' + MENU_DOTS + '</button>' +
+      '</div>'
+  }
+  el.innerHTML = html
+  const favRows = el.querySelectorAll<HTMLElement>('.fav')
+  favRows.forEach(function (row) {
+    row.addEventListener('click', function () {
+      useFavorite(favorites[Number(row.dataset.fi)])
+    })
+  })
+  const menus = el.querySelectorAll<HTMLElement>('.favmenu')
+  menus.forEach(function (menu) {
+    menu.addEventListener('click', function (e) {
+      e.stopPropagation()
+      showFavEdit(Number(menu.dataset.fi))
+    })
+  })
+}
+
+const favAddBtn = document.getElementById('fav-add')
+if (favAddBtn) {
+  favAddBtn.addEventListener('click', function () {
+    if (!favInput || !stationList.length) {
+      return
+    }
+    const code = resolveCode(favInput)
+    if (!code) {
+      favInput.placeholder = 'Pick a station first'
+      return
+    }
+    addFavorite({ code: code, name: nameForCode(code) })
+    favInput.value = ''
+    delete favInput.dataset.code
+  })
+}
+
+const favEditView = document.createElement('div')
+favEditView.id = 'fav-edit'
+favEditView.hidden = true
+favEditView.className = 'overlay overlay--top'
+document.body.appendChild(favEditView)
+
+function showFavEdit(index: number) {
+  const fav = favorites[index]
+  if (!fav) {
+    return
+  }
+  let chosen: FavIcon = fav.icon
+  function iconCard(kind: FavIcon, label: string): string {
+    let cls = 'icon-card'
+    if (kind === chosen) {
+      cls = 'icon-card selected'
+    }
+    return `
+    <button type="button" class="${cls}" data-icon="${kind}">
+      ${iconSvg(kind, 26)}<span>${label}</span>
+    </button>`
+  }
+
+  const safeLabel = fav.label.replace(/"/g, '&quot;')
+  favEditView.innerHTML = `
+    <header class="detail-header">
+      <button id="fav-back" type="button" aria-label="Back" class="icon-btn">${BACK_ICON}</button>
+      <div class="sheet-title">Favorite location</div>
+      <span class="header-spacer"></span>
+    </header>
+    <main class="sheet-main">
+      <div class="fav-preview">
+        <span class="fav-preview-pill">${fav.name}</span>
+      </div>
+
+      <div class="field-label">Name</div>
+      <div class="name-field">
+        <input id="fav-name" type="text" value="${safeLabel}" class="name-input" />
+        <button id="fav-name-clear" type="button" aria-label="Clear" class="name-clear">${icon('Edit & Settings Icons/Cross', { size: 18 })}</button>
+      </div>
+
+      <div class="field-label mt">Icon</div>
+      <div id="icon-cards" class="icon-cards">
+        ${iconCard('home', 'Home')}${iconCard('work', 'Work')}${iconCard('default', 'Default')}
+      </div>
+
+      <button id="fav-save" type="button" class="sheet-save">Save</button>
+      <button id="fav-remove" type="button" class="sheet-remove">Remove from favorites</button>
+    </main>`
+
+  function close() {
+    favEditView.hidden = true
+  }
+  const backBtn = favEditView.querySelector<HTMLButtonElement>('#fav-back')
+  if (backBtn) {
+    backBtn.addEventListener('click', close)
+  }
+  const nameClear = favEditView.querySelector<HTMLButtonElement>('#fav-name-clear')
+  if (nameClear) {
+    nameClear.addEventListener('click', function () {
+      const input = favEditView.querySelector<HTMLInputElement>('#fav-name')
+      if (input) {
+        input.value = ''
+        input.focus()
+      }
+    })
+  }
+  const cards = favEditView.querySelectorAll<HTMLButtonElement>('.icon-card')
+  cards.forEach(function (card) {
+    card.addEventListener('click', function () {
+      chosen = card.dataset.icon as FavIcon
+      const allCards = favEditView.querySelectorAll<HTMLButtonElement>('.icon-card')
+      allCards.forEach(function (c) {
+        if (c.dataset.icon === chosen) {
+          c.classList.add('selected')
+        } else {
+          c.classList.remove('selected')
+        }
+      })
+    })
+  })
+  const saveBtn = favEditView.querySelector<HTMLButtonElement>('#fav-save')
+  if (saveBtn) {
+    saveBtn.addEventListener('click', function () {
+      const input = favEditView.querySelector<HTMLInputElement>('#fav-name')
+      let newLabel = fav.name
+      if (input && input.value.trim()) {
+        newLabel = input.value.trim()
+      }
+      fav.label = newLabel
+      fav.icon = chosen
+      persistFavorites()
+      renderFavorites()
+      close()
+    })
+  }
+  const removeBtn = favEditView.querySelector<HTMLButtonElement>('#fav-remove')
+  if (removeBtn) {
+    removeBtn.addEventListener('click', function () {
+      removeFavorite(fav.code)
+      close()
+    })
+  }
+  favEditView.scrollTop = 0
+  favEditView.hidden = false
+}
+
+renderFavorites()
+
+await renderLens()
+clockTimer = setInterval(function () {
+  renderLens().catch(function (err) {
+    console.error(err)
+  })
+}, CLOCK_MS)
+tripsTimer = setInterval(function () {
+  refreshOpenTrips().catch(function (err) {
+    console.error(err)
+  })
+}, TRIPS_REFRESH_MS)

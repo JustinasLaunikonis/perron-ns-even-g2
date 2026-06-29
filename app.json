@@ -1,0 +1,20 @@
+{
+  "package_id": "com.perron.ns",
+  "name": "Perron-NS",
+  "version": "0.1.4",
+  "edition": "202601",
+  "description": "NS (Dutch Railways) journey planner for Even G2 - glanceable departures with delays, platforms and crowd forecasts.",
+  "tagline": "Plan Dutch rail journeys from your glasses",
+  "author": "JustinasLa",
+  "entrypoint": "index.html",
+  "min_app_version": "2.0.0",
+  "min_sdk_version": "0.0.11",
+  "supported_languages": ["en"],
+  "permissions": [
+    {
+      "name": "network",
+      "desc": "Fetches Dutch Railways (NS) station, departure and journey-planning data.",
+      "whitelist": ["https://perron-ns-proxy.justinasla.workers.dev"]
+    }
+  ]
+}
