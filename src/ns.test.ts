@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { fetchBoard, fetchStations, fetchTrips } from './ns'
+import { fetchBoard, fetchJourney, fetchStations, fetchTrips } from './ns'
 
 function jsonResponse(data: unknown, init: { ok?: boolean; status?: number } = {}): Response {
   const ok = init.ok ?? true
@@ -119,6 +119,58 @@ describe('fetchTrips', () => {
     expect(leg.crowd).toBe('HIGH')
     expect(leg.exitSide).toBe('LEFT')
     expect(leg.intermediateStops).toBe(2) // stops.length (4) - 2
+  })
+
+  it('parses the per-leg stop list and skips passing (non-stopping) stops', async () => {
+    mockFetch([
+      {
+        match: '/v3/trips',
+        value: jsonResponse({
+          trips: [
+            {
+              legs: [
+                {
+                  name: 'IC 713',
+                  direction: 'Groningen',
+                  origin: { name: 'Lelystad Centrum', plannedDateTime: '2026-06-29T05:48:00+0200' },
+                  destination: { name: 'Groningen', plannedDateTime: '2026-06-29T07:12:00+0200' },
+                  stops: [
+                    {
+                      name: 'Lelystad Centrum',
+                      plannedDepartureDateTime: '2026-06-29T05:48:00+0200',
+                      plannedDepartureTrack: '2',
+                    },
+                    {
+                      name: 'Dronten',
+                      passing: true,
+                    },
+                    {
+                      name: 'Zwolle',
+                      plannedArrivalDateTime: '2026-06-29T06:14:00+0200',
+                      plannedDepartureDateTime: '2026-06-29T06:15:00+0200',
+                      actualDepartureDateTime: '2026-06-29T06:16:00+0200',
+                      actualDepartureTrack: '7',
+                    },
+                    {
+                      name: 'Groningen',
+                      plannedArrivalDateTime: '2026-06-29T07:12:00+0200',
+                      plannedArrivalTrack: '4a',
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        }),
+      },
+    ])
+
+    const leg = (await fetchTrips('LLS', 'GN'))[0].legs[0]
+    expect(leg.stops.map((s) => s.name)).toEqual(['Lelystad Centrum', 'Zwolle', 'Groningen'])
+    expect(leg.stops[0].track).toBe('2')
+    expect(leg.stops[1].departureDelayMin).toBe(1) // actual 06:16 vs planned 06:15
+    expect(leg.stops[1].track).toBe('7') // actual departure track preferred
+    expect(leg.stops[2].track).toBe('4a') // falls back to planned arrival track
   })
 
   it('clamps negative delays to zero (early trains are not "negative delay")', async () => {
@@ -258,6 +310,65 @@ describe('fetchTrips', () => {
       { match: '/v3/trips', value: jsonResponse('upstream rate limited', { ok: false, status: 429 }) },
     ])
     await expect(fetchTrips('A', 'B')).rejects.toThrow('NS 429: upstream rate limited')
+  })
+})
+
+describe('fetchJourney', () => {
+  it('parses a full train route, skips passing stops, and maps times/tracks/delays', async () => {
+    mockFetch([
+      {
+        match: '/v2/journey',
+        value: jsonResponse({
+          payload: {
+            stops: [
+              {
+                stop: { name: 'Lelystad Centrum' },
+                status: 'ORIGIN',
+                departures: [{ plannedTime: '2026-06-29T05:48:00+0200', plannedTrack: '2' }],
+              },
+              {
+                stop: { name: 'Dronten' },
+                status: 'PASSING',
+              },
+              {
+                stop: { name: 'Zwolle' },
+                status: 'STOP',
+                arrivals: [{ plannedTime: '2026-06-29T06:14:00+0200' }],
+                departures: [
+                  {
+                    plannedTime: '2026-06-29T06:15:00+0200',
+                    actualTime: '2026-06-29T06:16:00+0200',
+                    actualTrack: '7',
+                  },
+                ],
+              },
+              {
+                stop: { name: 'Groningen' },
+                status: 'DESTINATION',
+                arrivals: [{ plannedTime: '2026-06-29T07:12:00+0200', plannedTrack: '4a' }],
+              },
+            ],
+          },
+        }),
+      },
+    ])
+
+    const stops = await fetchJourney('713', { dateTime: '2026-06-29T06:15:00+0200' })
+    expect(stops.map((s) => s.name)).toEqual(['Lelystad Centrum', 'Zwolle', 'Groningen'])
+    expect(stops[0].track).toBe('2')
+    expect(stops[1].departureDelayMin).toBe(1) // actual 06:16 vs planned 06:15
+    expect(stops[1].track).toBe('7') // actual departure track preferred
+    expect(stops[2].track).toBe('4a') // falls back to planned arrival track
+
+    const url = lastFetchUrl()
+    expect(url).toContain('/v2/journey')
+    expect(url).toContain('train=713')
+    expect(url).toContain('dateTime=' + encodeURIComponent('2026-06-29T06:15:00+0200'))
+  })
+
+  it('returns an empty array when the journey payload has no stops', async () => {
+    mockFetch([{ match: '/v2/journey', value: jsonResponse({ payload: {} }) }])
+    expect(await fetchJourney('713')).toEqual([])
   })
 })
 

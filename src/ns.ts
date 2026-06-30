@@ -39,12 +39,23 @@ async function getJSON(url: string): Promise<any> {
 
 export type TravelMode = 'TRAIN' | 'BUS' | 'TRAM' | 'METRO' | 'FERRY' | 'WALK' | 'OTHER'
 
+export interface LegStop {
+  name: string
+  arrival: string
+  departure: string
+  arrivalDelayMin: number
+  departureDelayMin: number
+  track: string
+  cancelled: boolean
+}
+
 export interface TripLeg {
   service: string
   mode: TravelMode
   category: string
   displayName: string
   operator: string
+  trainNumber: string
   direction: string
   origin: string
   originTrack: string
@@ -57,6 +68,7 @@ export interface TripLeg {
   durationMin: number
   crowd: string
   intermediateStops: number
+  stops: LegStop[]
   exitSide: string
   walkToNextMin: number | null
   cancelled: boolean
@@ -106,6 +118,119 @@ function delay(planned: string | undefined, actual: string | undefined): number 
     rounded = 0
   }
   return rounded
+}
+
+function parseStops(rawStops: any): LegStop[] {
+  const stops: LegStop[] = []
+  if (!Array.isArray(rawStops)) {
+    return stops
+  }
+  for (const s of rawStops) {
+    if (s.passing) {
+      continue
+    }
+    let name = ''
+    if (s.name) {
+      name = s.name
+    }
+    let arrival = ''
+    if (s.plannedArrivalDateTime) {
+      arrival = s.plannedArrivalDateTime
+    } else if (s.actualArrivalDateTime) {
+      arrival = s.actualArrivalDateTime
+    }
+    let departure = ''
+    if (s.plannedDepartureDateTime) {
+      departure = s.plannedDepartureDateTime
+    } else if (s.actualDepartureDateTime) {
+      departure = s.actualDepartureDateTime
+    }
+    let track = ''
+    if (s.actualDepartureTrack) {
+      track = s.actualDepartureTrack
+    } else if (s.plannedDepartureTrack) {
+      track = s.plannedDepartureTrack
+    } else if (s.actualArrivalTrack) {
+      track = s.actualArrivalTrack
+    } else if (s.plannedArrivalTrack) {
+      track = s.plannedArrivalTrack
+    }
+    let cancelled = false
+    if (s.cancelled) {
+      cancelled = true
+    }
+    stops.push({
+      name: name,
+      arrival: arrival,
+      departure: departure,
+      arrivalDelayMin: delay(s.plannedArrivalDateTime, s.actualArrivalDateTime),
+      departureDelayMin: delay(s.plannedDepartureDateTime, s.actualDepartureDateTime),
+      track: track,
+      cancelled: cancelled,
+    })
+  }
+  return stops
+}
+
+function firstEntry(arr: any): any {
+  if (Array.isArray(arr) && arr.length > 0) {
+    return arr[0]
+  }
+  return {}
+}
+
+function parseJourneyStops(rawStops: any): LegStop[] {
+  const stops: LegStop[] = []
+  if (!Array.isArray(rawStops)) {
+    return stops
+  }
+  for (const s of rawStops) {
+    if (s.status === 'PASSING') {
+      continue
+    }
+    let name = ''
+    if (s.stop && s.stop.name) {
+      name = s.stop.name
+    }
+    const arr = firstEntry(s.arrivals)
+    const dep = firstEntry(s.departures)
+    let arrival = ''
+    if (arr.plannedTime) {
+      arrival = arr.plannedTime
+    } else if (arr.actualTime) {
+      arrival = arr.actualTime
+    }
+    let departure = ''
+    if (dep.plannedTime) {
+      departure = dep.plannedTime
+    } else if (dep.actualTime) {
+      departure = dep.actualTime
+    }
+    let track = ''
+    if (dep.actualTrack) {
+      track = dep.actualTrack
+    } else if (dep.plannedTrack) {
+      track = dep.plannedTrack
+    } else if (arr.actualTrack) {
+      track = arr.actualTrack
+    } else if (arr.plannedTrack) {
+      track = arr.plannedTrack
+    }
+    let cancelled = false
+    if (arr.cancelled || dep.cancelled) {
+      cancelled = true
+    }
+    stops.push({
+      name: name,
+      arrival: arrival,
+      departure: departure,
+      arrivalDelayMin: delay(arr.plannedTime, arr.actualTime),
+      departureDelayMin: delay(dep.plannedTime, dep.actualTime),
+      track: track,
+      cancelled: cancelled,
+    })
+  }
+  return stops
 }
 
 function legMode(l: any): TravelMode {
@@ -234,6 +359,11 @@ export async function fetchTrips(
         operator = l.product.operatorName
       }
 
+      let trainNumber = ''
+      if (l.product && l.product.number) {
+        trainNumber = String(l.product.number)
+      }
+
       let direction = ''
       if (l.direction) {
         direction = l.direction
@@ -316,6 +446,7 @@ export async function fetchTrips(
         category: category,
         displayName: displayName,
         operator: operator,
+        trainNumber: trainNumber,
         direction: direction,
         origin: origin,
         originTrack: originTrack,
@@ -328,6 +459,7 @@ export async function fetchTrips(
         durationMin: durationMin,
         crowd: crowd,
         intermediateStops: intermediateStops,
+        stops: parseStops(l.stops),
         exitSide: exitSide,
         walkToNextMin: walkToNextMin,
         cancelled: legCancelled,
@@ -418,6 +550,28 @@ export async function fetchTrips(
   }
 
   return trips
+}
+
+export async function fetchJourney(
+  train: string,
+  opts: { dateTime?: string; lang?: string } = {},
+): Promise<LegStop[]> {
+  let lang = 'en'
+  if (opts.lang) {
+    lang = opts.lang
+  }
+  let url =
+    BASE + '/v2/journey?lang=' + encodeURIComponent(lang) + '&train=' + encodeURIComponent(train)
+  if (opts.dateTime) {
+    url += '&dateTime=' + encodeURIComponent(opts.dateTime)
+  }
+  const data = await getJSON(url)
+
+  let rawStops: any[] = []
+  if (data && data.payload && data.payload.stops) {
+    rawStops = data.payload.stops
+  }
+  return parseJourneyStops(rawStops)
 }
 
 export interface StationInfo {

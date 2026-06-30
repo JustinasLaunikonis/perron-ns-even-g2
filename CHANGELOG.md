@@ -4,6 +4,24 @@ All notable changes to this project are documented here. The format is based on
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.5] - 2026-06-30
+
+### Added
+
+- **Tap a train to see every stop it makes** — in the phone journey detail, each
+  train's service box (the one with the drill-in chevron, e.g. _Sneltrein to
+  Zwolle · 7 intermediate stops_) is now tappable and opens a stop list for that
+  train. Stops show arrival/departure times, delays (`+N`) and platforms on a
+  vertical rail; your **boarding** and **disembarking** stops are marked with
+  hollow ring dots, bold names and "Board here" / "Get off here" labels.
+- **Full route, with previous and onward stops** — the stop list shows the
+  train's entire route from its origin to terminus, not just your segment. Stops
+  before you board and after you get off are rendered dimmed so your part of the
+  journey stands out. The full route is fetched lazily from the NS journey
+  endpoint (`/v2/journey`) through the existing proxy; if it is unavailable the
+  page falls back to the leg's own stops. `TripLeg` gained a `trainNumber` field
+  and `ns.ts` a `fetchJourney()` client for this.
+
 ## [0.1.4] - 2026-06-29
 
 ### Changed

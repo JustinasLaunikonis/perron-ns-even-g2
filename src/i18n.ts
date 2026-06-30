@@ -38,6 +38,8 @@ const en = {
 
   stopsPlural: 'intermediate stops',
   stopsSingular: 'intermediate stop',
+  boarding: 'Board here',
+  disembark: 'Get off here',
   exitSideLabel: 'Exit side',
   walkToTransfer: 'Walk to transfer',
   walkToPlatform: 'Walk to platform',
@@ -135,6 +137,8 @@ const nl: Record<StringKey, string> = {
 
   stopsPlural: '',
   stopsSingular: '',
+  boarding: '',
+  disembark: '',
   exitSideLabel: '',
   walkToTransfer: '',
   walkToPlatform: '',

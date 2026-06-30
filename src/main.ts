@@ -5,8 +5,8 @@ import {
   TextContainerUpgrade,
   OsEventTypeList,
 } from '@evenrealities/even_hub_sdk'
-import { fetchStations, fetchTrips } from './ns'
-import type { StationInfo, Trip, TripLeg, TravelMode, TripOptions } from './ns'
+import { fetchStations, fetchTrips, fetchJourney } from './ns'
+import type { StationInfo, Trip, TripLeg, LegStop, TravelMode, TripOptions } from './ns'
 import { t as tr, getLang, setLang, dateLocale, LANGS } from './i18n'
 import type { Lang } from './i18n'
 import './style.css'
@@ -1233,7 +1233,7 @@ function platformBadge(track: string): string {
 
 const STATION_DOT = '<span class="station-dot"></span>'
 
-function legCard(leg: TripLeg): string {
+function legCard(leg: TripLeg, idx: number): string {
   let stopWord = tr('stopsPlural')
   if (leg.intermediateStops === 1) {
     stopWord = tr('stopsSingular')
@@ -1242,6 +1242,13 @@ function legCard(leg: TripLeg): string {
   let exitHtml = ''
   if (leg.exitSide) {
     exitHtml = '<span class="leg-exit">' + tr('exitSideLabel') + ' ' + leg.exitSide.toLowerCase() + '</span>'
+  }
+  let serviceOpen = '<div class="leg-service">'
+  let chevron = ''
+  if (leg.stops.length > 1) {
+    serviceOpen =
+      '<div class="leg-service leg-service--tap" data-leg="' + idx + '" role="button" tabindex="0">'
+    chevron = CHEVRON_ICON
   }
   return `
     <div class="leg">
@@ -1263,13 +1270,13 @@ function legCard(leg: TripLeg): string {
           <span class="leg-station">${leg.origin}</span>
           ${platformBadge(leg.originTrack)}
         </div>
-        <div class="leg-service">
+        ${serviceOpen}
           <div class="leg-service-text">
             <div class="leg-service-name">${leg.displayName}</div>
             <div class="leg-service-dir">${tr('connectorTo')} ${leg.direction}</div>
             <div class="leg-service-meta">${crowdInline(leg.crowd)} · ${stops}</div>
           </div>
-          ${CHEVRON_ICON}
+          ${chevron}
         </div>
         <div class="leg-stop">
           <span>
@@ -1333,6 +1340,12 @@ detailView.id = 'detail'
 detailView.hidden = true
 detailView.className = 'overlay'
 document.body.appendChild(detailView)
+
+const stopsView = document.createElement('div')
+stopsView.id = 'stops'
+stopsView.hidden = true
+stopsView.className = 'overlay overlay--top'
+document.body.appendChild(stopsView)
 
 function starSvg(filled: boolean, size: number = 20): string {
   if (filled) {
@@ -1402,7 +1415,7 @@ function buildDetail(trip: Trip): string {
   let route = ''
   for (let i = 0; i < trip.legs.length; i++) {
     const leg = trip.legs[i]
-    route += legCard(leg)
+    route += legCard(leg, i)
     if (i < trip.legs.length - 1) {
       route += transferBlock(leg, trip.legs[i + 1])
     }
@@ -1424,6 +1437,7 @@ function buildDetail(trip: Trip): string {
 }
 
 function showDetail(trip: Trip, idx: number = detailTrips.indexOf(trip)) {
+  stopsView.hidden = true
   detailView.innerHTML = buildDetail(trip)
   const backBtn = detailView.querySelector<HTMLButtonElement>('#detail-back')
   if (backBtn) {
@@ -1437,9 +1451,186 @@ function showDetail(trip: Trip, idx: number = detailTrips.indexOf(trip)) {
       }
     })
   }
+  const taps = detailView.querySelectorAll<HTMLDivElement>('.leg-service--tap')
+  taps.forEach(function (el) {
+    const legIdx = Number(el.dataset.leg)
+    const leg = trip.legs[legIdx]
+    if (!leg) {
+      return
+    }
+    el.addEventListener('click', function () {
+      showStops(leg)
+    })
+    el.addEventListener('keydown', function (ev) {
+      if (ev.key === 'Enter' || ev.key === ' ') {
+        ev.preventDefault()
+        showStops(leg)
+      }
+    })
+  })
   detailView.scrollTop = 0
   detailView.hidden = false
   mirrorDetailToLens(idx)
+}
+
+const STOP_START_ICON = icon('Navigate Feature Icon/Location', { size: 18 })
+const STOP_END_ICON = icon('Navigate Feature Icon/End Location', { size: 18 })
+
+function stopTimeLine(iso: string, delayMin: number): string {
+  if (!iso) {
+    return ''
+  }
+  return '<span class="stop-time">' + fmtTime(iso) + delayBadge(delayMin) + '</span>'
+}
+
+function stopRow(stop: LegStop, i: number, total: number, boardIdx: number, exitIdx: number): string {
+  const isFirst = i === 0
+  const isLast = i === total - 1
+  const isBoard = i === boardIdx
+  const isExit = i === exitIdx
+  const inSegment = i >= boardIdx && i <= exitIdx
+
+  let times = ''
+  if (isFirst) {
+    times = stopTimeLine(stop.departure, stop.departureDelayMin)
+  } else if (isLast) {
+    times = stopTimeLine(stop.arrival, stop.arrivalDelayMin)
+  } else {
+    times = stopTimeLine(stop.arrival, stop.arrivalDelayMin) + stopTimeLine(stop.departure, stop.departureDelayMin)
+  }
+  let timesClass = 'stop-times'
+  if (!inSegment) {
+    timesClass = 'stop-times stop-times--muted'
+  }
+
+  let lineTop = '<span class="stop-line"></span>'
+  if (isFirst) {
+    lineTop = '<span class="stop-line stop-line--hidden"></span>'
+  } else if (!(i > boardIdx && i <= exitIdx)) {
+    lineTop = '<span class="stop-line stop-line--muted"></span>'
+  }
+  let lineBottom = '<span class="stop-line"></span>'
+  if (isLast) {
+    lineBottom = '<span class="stop-line stop-line--hidden"></span>'
+  } else if (!(i >= boardIdx && i < exitIdx)) {
+    lineBottom = '<span class="stop-line stop-line--muted"></span>'
+  }
+
+  let dotClass = 'stop-dot'
+  let nameClass = 'stop-name'
+  let marker = ''
+  if (isBoard) {
+    dotClass = 'stop-dot stop-dot--end'
+    nameClass = 'stop-name stop-name--end'
+    marker = '<span class="stop-marker">' + STOP_START_ICON + tr('boarding') + '</span>'
+  } else if (isExit) {
+    dotClass = 'stop-dot stop-dot--end'
+    nameClass = 'stop-name stop-name--end'
+    marker = '<span class="stop-marker">' + STOP_END_ICON + tr('disembark') + '</span>'
+  } else if (!inSegment) {
+    dotClass = 'stop-dot stop-dot--muted'
+    nameClass = 'stop-name stop-name--muted'
+  }
+
+  let rowId = ''
+  if (isBoard) {
+    rowId = ' id="stop-board"'
+  }
+
+  return `
+    <div class="stop"${rowId}>
+      <div class="${timesClass}">${times}</div>
+      <div class="stop-rail">
+        ${lineTop}
+        <span class="${dotClass}"></span>
+        ${lineBottom}
+      </div>
+      <div class="stop-body">
+        <span class="${nameClass}">${stop.name}</span>
+        ${platformBadge(stop.track)}
+        ${marker}
+      </div>
+    </div>`
+}
+
+function buildStops(leg: TripLeg, stops: LegStop[], boardIdx: number, exitIdx: number): string {
+  let rows = ''
+  for (let i = 0; i < stops.length; i++) {
+    rows += stopRow(stops[i], i, stops.length, boardIdx, exitIdx)
+  }
+  return `
+    <header class="detail-header">
+      <button id="stops-back" type="button" aria-label="${tr('ariaBack')}" class="icon-btn">${BACK_ICON}</button>
+      <div class="detail-title">
+        <div class="detail-title-main">${leg.displayName}</div>
+        <div class="detail-title-sub">${tr('connectorTo')} ${leg.direction}</div>
+      </div>
+      <span class="header-spacer"></span>
+    </header>
+    <main class="detail-main">
+      <div class="stops-list">${rows}</div>
+    </main>`
+}
+
+function bindStopsBack() {
+  const backBtn = stopsView.querySelector<HTMLButtonElement>('#stops-back')
+  if (backBtn) {
+    backBtn.addEventListener('click', function () {
+      stopsView.hidden = true
+    })
+  }
+}
+
+function indexByName(stops: LegStop[], name: string): number {
+  for (let i = 0; i < stops.length; i++) {
+    if (stops[i].name === name) {
+      return i
+    }
+  }
+  return -1
+}
+
+let stopsToken = 0
+
+function showStops(leg: TripLeg) {
+  if (!leg || leg.stops.length === 0) {
+    return
+  }
+  stopsToken++
+  const token = stopsToken
+  stopsView.innerHTML = buildStops(leg, leg.stops, 0, leg.stops.length - 1)
+  bindStopsBack()
+  stopsView.scrollTop = 0
+  stopsView.hidden = false
+
+  if (!leg.trainNumber) {
+    return
+  }
+  fetchJourney(leg.trainNumber, { dateTime: leg.departure, lang: getLang() })
+    .then(function (full) {
+      if (token !== stopsToken || stopsView.hidden) {
+        return
+      }
+      if (full.length === 0) {
+        return
+      }
+      const boardIdx = indexByName(full, leg.origin)
+      const exitIdx = indexByName(full, leg.destination)
+      if (boardIdx < 0 || exitIdx < 0 || boardIdx > exitIdx) {
+        return
+      }
+      stopsView.innerHTML = buildStops(leg, full, boardIdx, exitIdx)
+      bindStopsBack()
+      if (boardIdx > 0) {
+        const boardEl = stopsView.querySelector<HTMLDivElement>('#stop-board')
+        if (boardEl) {
+          boardEl.scrollIntoView({ block: 'center' })
+        }
+      }
+    })
+    .catch(function (err) {
+      console.error('fetchJourney failed:', err)
+    })
 }
 
 function mirrorHomeToLens() {

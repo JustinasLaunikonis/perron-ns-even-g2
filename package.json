@@ -1,7 +1,7 @@
 {
   "name": "perron-ns-g2",
   "private": true,
-  "version": "0.1.4",
+  "version": "0.1.5",
   "type": "module",
   "description": "Glanceable NS (Dutch Railways) departures for Even Realities G2 — Even Hub app.",
   "scripts": {

@@ -3,6 +3,12 @@
 Entered per supported language in the Even Hub dashboard at submission.
 For the first version, these describe what the app does (not "initial release").
 
+## en — v0.1.5
+
+Tap a train in a journey's details to see every stop it makes, from start to end.
+Your boarding and exit stops are highlighted, and the stops before and after your
+part of the trip are shown too — with times, delays and platforms.
+
 ## en — v0.1.4
 
 Under-the-hood maintenance: updated to the latest Even Hub SDK and tidied up the
